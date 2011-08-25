@@ -1,84 +1,97 @@
-import java.io.{File, PrintWriter}
-import java.lang.Class
+package org.improving
+
+import java.io.{ File, PrintWriter }
 import java.util.Arrays
-import javax.xml.bind.annotation.{XmlAttribute, XmlType}
-import reflect.generic.PickleFormat._
 import java.lang.Float.intBitsToFloat
 import java.lang.Double.longBitsToDouble
-import reflect.generic.{Flags, ByteCodecs, PickleBuffer}
+import scala.reflect.internal.pickling._
+import scala.reflect.internal.Flags
+import scala.tools.nsc.util.ShowPickled
+import scala.sys.process._
+import PickleFormat._
 
-
-object PickledVisualizer {
-  def main(args: Array[String]) {
-    if (args.length < 1) {
-      runDemo
-    } else {
-      loadFromClassPath(args(0))
-    }
-  }
-
+object PickleView {
   def loadFromClassPath(name: String) {
     println("Processing class: " + name)
     val clazz: Class[_] = getClass.getClassLoader.loadClass(name)
-    new PickleProcessor(clazz).process
+    new PickleProcessor(clazz).process()
   }
 
   def runDemo() {
     println("Running demo...")
-    (new PickleProcessor(classOf[TestClass1])).process
-    (new PickleProcessor(classOf[TestClass2])).process
+    (new PickleProcessor(classOf[TestClass1])).process()
+    (new PickleProcessor(classOf[TestClass2])).process()
+  }
+
+  def main(args: Array[String]) {
+    if (args.isEmpty) runDemo
+    else args foreach loadFromClassPath
+    sys.exit(0)
   }
 }
 
 class PickleProcessor(clazz: Class[_]) {
+  def this(name: String) = this (ClassLoader.getSystemClassLoader().loadClass(name))
+  
   val defaultColor = "navajowhite"
-  val nameColor = "mediumseagreen"
-  val symColor = "skyblue"
-  val refColor = "darkgoldenrod1"
-  val tpeColor = "plum2"
-  val annotColor = "coral"
+  val nameColor    = "mediumseagreen"
+  val symColor     = "skyblue"
+  val refColor     = "darkgoldenrod1"
+  val tpeColor     = "plum2"
+  val annotColor   = "coral"
   val literalColor = "brown"
 
   val bytes: Array[Byte] = {
     val scalaSigAnnot = clazz.getAnnotation(classOf[scala.reflect.ScalaSignature])
-    val encodedBytes = scalaSigAnnot.bytes.getBytes
-    val len = ByteCodecs.decode(encodedBytes)
+    val encodedBytes  = scalaSigAnnot.bytes.getBytes
+    val len           = ByteCodecs.decode(encodedBytes)
+    
     Arrays.copyOf(encodedBytes, len)
   }
 
-  var w: PrintWriter = _
+  private var w: PrintWriter = _
+  def withWriter[T](writer: PrintWriter)(body: => T): T = {
+    w = writer
+    try body
+    finally { w.close() ; w = null }
+  }
 
   val buf = new PickleBuffer(bytes, 0, bytes.length)
 
   val index: Array[Int] = {
-    println("Version " + buf.readNat() + "." + buf.readNat())
+    val version = buf.readNat() + "." + buf.readNat()
     val i = buf.createIndex
-    println("Table size: " + i.length)
     buf.readIndex = 0
     i
   }
 
   val visited = new Array[Boolean](index.length)
 
-  def this(name: String) = this (ClassLoader.getSystemClassLoader().loadClass(name))
-
   def seekToPos(pos: Int) {
     buf.readIndex = pos;
   }
 
-  def process() {
-    w = new PrintWriter(new File(clazz.getSimpleName + ".dot"))
-    try {
+  def process(outputExtension: String = "pdf") {
+    val dir = new File("target/dot") 
+    dir.mkdirs()
+    val dotFile = new File(dir, clazz.getSimpleName + ".dot")
+    val outFile = new File(dir, clazz.getSimpleName + "." + outputExtension)
+    println("Generating " + outFile + "...")
+    
+    withWriter(new PrintWriter(dotFile)) {
       w.println("digraph {")
       w.println("graph [label=\"" + clazz.getSimpleName + "\", concentrate=true];")
       w.println("node [shape=box, style=filled, color=" + defaultColor + "];")
 
-      for (i <- 0 until index.size) processEntry(i)
-
+      0 until index.size foreach processEntry
       w.println("}")
-    } finally {
-      w.close()
     }
+
+    (
+          ("dot -Tpdf -o " + outFile + " " + dotFile)
+      #&& ("test -f /usr/bin/open")
+      #&& ("/usr/bin/open " + outFile)
+    ).!!
   }
 
   def processEntry(i: Int) {
@@ -96,7 +109,7 @@ class PickleProcessor(clazz: Class[_]) {
   def processEntry(tag: Int, len: Int, i: Int) {
     val end = buf.readIndex + len
 
-    val tn = tag2string(tag)
+    val tn = ShowPickled.tag2string(tag)
 
     tag match {
       case (TERMname | TYPEname) =>
@@ -226,7 +239,7 @@ class PickleProcessor(clazz: Class[_]) {
       (nextIdx, buf.readNat)
     }
 
-    printNodeInfo(i, tag + "[" + flags2string(flagLongNat) + "]", symColor)
+    printNodeInfo(i, tag + "[" + Flags.flagsToString(flagLongNat) + "]", symColor)
 
     if (privateWithinIdx != -1) {
       processRef(i, privateWithinIdx, "privateWithin_Ref")
@@ -254,61 +267,6 @@ class PickleProcessor(clazz: Class[_]) {
   }
 
   def processListRef(i: Int, end: Int, name: String = "") {buf.until(end, () => processRef(i, name))}
-
-  def tag2string(tag: Int): String = tag match {
-    case TERMname => "TERMname"
-    case TYPEname => "TYPEname"
-    case NONEsym => "NONEsym"
-    case TYPEsym => "TYPEsym"
-    case ALIASsym => "ALIASsym"
-    case CLASSsym => "CLASSsym"
-    case MODULEsym => "MODULEsym"
-    case VALsym => "VALsym"
-    case EXTref => "EXTref"
-    case EXTMODCLASSref => "EXTMODCLASSref"
-    case NOtpe => "NOtpe"
-    case NOPREFIXtpe => "NOPREFIXtpe"
-    case THIStpe => "THIStpe"
-    case SINGLEtpe => "SINGLEtpe"
-    case CONSTANTtpe => "CONSTANTtpe"
-    case TYPEREFtpe => "TYPEREFtpe"
-    case TYPEBOUNDStpe => "TYPEBOUNDStpe"
-    case REFINEDtpe => "REFINEDtpe"
-    case CLASSINFOtpe => "CLASSINFOtpe"
-    case METHODtpe => "METHODtpe"
-    case POLYtpe => "POLYtpe"
-    case IMPLICITMETHODtpe => "IMPLICITMETHODtpe"
-
-    case LITERAL => "LITERAL"
-    case LITERALunit => "LITERALunit"
-    case LITERALboolean => "LITERALboolean"
-    case LITERALbyte => "LITERALbyte"
-    case LITERALshort => "LITERALshort"
-    case LITERALchar => "LITERALchar"
-    case LITERALint => "LITERALint"
-    case LITERALlong => "LITERALlong"
-    case LITERALfloat => "LITERALfloat"
-    case LITERALdouble => "LITERALdouble"
-    case LITERALstring => "LITERALstring"
-    case LITERALnull => "LITERALnull"
-    case LITERALclass => "LITERALclass"
-    case LITERALenum => "LITERALenum"
-    case SYMANNOT => "SYMANNOT"
-    case CHILDREN => "CHILDREN"
-    case ANNOTATEDtpe => "ANNOTATEDtpe"
-    case ANNOTINFO => "ANNOTINFO"
-    case ANNOTARGARRAY => "ANNOTARGARRAY"
-
-    case SUPERtpe => "SUPERtpe"
-    case DEBRUIJNINDEXtpe => "DEBRUIJNINDEXtpe"
-    case EXISTENTIALtpe => "EXISTENTIALtpe"
-
-    case TREE => "TREE"
-
-    case MODIFIERS => "MODIFIERS"
-
-    case _ => throw new RuntimeException("Unknown tag: " + tag)
-  }
 
   def treeTag2string(tag: Int): String = tag match {
     case EMPTYtree => "EMPTYtree"
@@ -357,87 +315,4 @@ class PickleProcessor(clazz: Class[_]) {
 
     case _ => throw new RuntimeException("Unknown tree tag: " + tag)
   }
-
-  def flags2string(pflags: Long) = {
-    val flags = Flags.pickledToRawFlags(pflags)
-    val sb = new StringBuilder();
-
-    def hasFlag(flag: Long) = (flags & flag) != 0
-    var first = true
-    def map(flag: Long, str: String) {
-      if (hasFlag(flag)) {
-        if (first) first = false else sb.append(',')
-        sb.append(str)
-      }
-    }
-
-    map(Flags.IMPLICIT, "IMPLICIT")
-    map(Flags.FINAL, "FINAL")
-    map(Flags.PRIVATE, "PRIVATE")
-    map(Flags.PROTECTED, "PROTECTED")
-    map(Flags.SEALED, "SEALED")
-    map(Flags.OVERRIDE, "OVERRIDE")
-    map(Flags.CASE, "CASE")
-    map(Flags.ABSTRACT, "ABSTRACT")
-    map(Flags.DEFERRED, "DEFERRED")
-    map(Flags.METHOD, "METHOD")
-    map(Flags.MODULE, "MODULE")
-    map(Flags.INTERFACE, "INTERFACE")
-    map(Flags.MUTABLE, "MUTABLE")
-    map(Flags.PARAM, "PARAM")
-    map(Flags.PACKAGE, "PACKAGE")
-    map(Flags.COVARIANT, "COVARIANT")
-    map(Flags.CAPTURED, "CAPTURED")
-    map(Flags.BYNAMEPARAM, "BYNAMEPARAM")
-    map(Flags.CONTRAVARIANT, "CONTRAVARIANT")
-    map(Flags.LABEL, "LABEL")
-    map(Flags.INCONSTRUCTOR, "INCONSTRUCTOR")
-    map(Flags.ABSOVERRIDE, "ABSOVERRIDE")
-    map(Flags.LOCAL, "LOCAL")
-    map(Flags.JAVA, "JAVA")
-    map(Flags.SYNTHETIC, "SYNTHETIC")
-    map(Flags.STABLE, "STABLE")
-    map(Flags.STATIC, "STATIC")
-    map(Flags.CASEACCESSOR, "CASEACCESSOR")
-    map(Flags.TRAIT, "TRAIT")
-    map(Flags.DEFAULTPARAM, "DEFAULTPARAM")
-    map(Flags.BRIDGE, "BRIDGE")
-    map(Flags.ACCESSOR, "ACCESSOR")
-    map(Flags.SUPERACCESSOR, "SUPERACCESSOR")
-    map(Flags.PARAMACCESSOR, "PARAMACCESSOR")
-    map(Flags.MODULEVAR, "MODULEVAR")
-    map(Flags.SYNTHETICMETH, "SYNTHETICMETH")
-    map(Flags.MONOMORPHIC, "MONOMORPHIC")
-    map(Flags.LAZY, "LAZY")
-    map(Flags.IS_ERROR, "IS_ERROR")
-    map(Flags.OVERLOADED, "OVERLOADED")
-    map(Flags.LIFTED, "LIFTED")
-    map(Flags.MIXEDIN, "MIXEDIN")
-    map(Flags.EXISTENTIAL, "EXISTENTIAL")
-    map(Flags.EXPANDEDNAME, "EXPANDEDNAME")
-    map(Flags.IMPLCLASS, "IMPLCLASS")
-    map(Flags.PRESUPER, "PRESUPER")
-    map(Flags.TRANS_FLAG, "TRANS_FLAG")
-    map(Flags.LOCKED, "LOCKED")
-    map(Flags.SPECIALIZED, "SPECIALIZED")
-    map(Flags.DEFAULTINIT, "DEFAULTINIT")
-    map(Flags.VBRIDGE, "VBRIDGE")
-
-    sb.toString
-  }
-}
-
-case class Entry(tag: Int, bytes: Array[Byte])
-
-
-class TestClass1 {
-  def met(param1: Long) = "method-1"
-
-  def met(param1: Long = 445, param2: String) = "method-2"
-}
-
-@XmlType
-class TestClass2 {
-  @XmlAttribute
-  val f1 = 150.75
 }
