@@ -9,4 +9,4 @@
   chmod +x sbt
 }
 
-./sbt -snapshot "run $*"
+./sbt "run $*"
