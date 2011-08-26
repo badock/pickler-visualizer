@@ -4,6 +4,7 @@ import java.io.{ File, PrintWriter }
 import java.util.Arrays
 import java.lang.Float.intBitsToFloat
 import java.lang.Double.longBitsToDouble
+import scala.collection.{ mutable, immutable }
 import scala.reflect.internal.pickling._
 import scala.reflect.internal.Flags
 import scala.tools.nsc.util.ShowPickled
@@ -31,25 +32,30 @@ object PickleView {
 }
 
 class PickleProcessor(clazz: Class[_]) {
-  def this(name: String) = this (ClassLoader.getSystemClassLoader().loadClass(name))
+  val clazzName = clazz.getSimpleName
   
+  def this(name: String) = this (ClassLoader.getSystemClassLoader().loadClass(name))
+
   val defaultColor = "navajowhite"
-  val nameColor    = "mediumseagreen"
-  val symColor     = "skyblue"
+  val symColor     = "firebrick"
   val refColor     = "darkgoldenrod1"
   val tpeColor     = "plum2"
   val annotColor   = "coral"
-  val literalColor = "brown"
+  val literalColor = "chartreuse"
+  
+  val typeFont = "/Users/paulp/Library/Fonts/Consolas Italic.ttf"
+  val termFont = "/Users/paulp/Library/Fonts/Consolas.ttf"
 
   val bytes: Array[Byte] = {
     val scalaSigAnnot = clazz.getAnnotation(classOf[scala.reflect.ScalaSignature])
     val encodedBytes  = scalaSigAnnot.bytes.getBytes
     val len           = ByteCodecs.decode(encodedBytes)
-    
+
     Arrays.copyOf(encodedBytes, len)
   }
 
   private var w: PrintWriter = _
+  
   def withWriter[T](writer: PrintWriter)(body: => T): T = {
     w = writer
     try body
@@ -66,25 +72,38 @@ class PickleProcessor(clazz: Class[_]) {
   }
 
   val visited = new Array[Boolean](index.length)
+  val indexToName = mutable.Map[Int, String]()
 
   def seekToPos(pos: Int) {
     buf.readIndex = pos;
   }
+  
+  private def q(s: String) = "\"" + s + "\""
+  def mkLine(label: String, pairs: Tuple2[_,_]*): String = {
+    pairs map { case (k, v) => k + "=" + v } mkString (label + " [", ", ", "];")
+  }
+  
+  def graphLine(pairs: Tuple2[_,_]*): String = mkLine("graph", pairs: _*)
+  def nodeLine(pairs: Tuple2[_,_]*): String  = mkLine("node", pairs: _*)
+  def digraph(body: => Unit) {
+    w println "digraph {"
+    body
+    w println "}"
+  }
 
   def process(outputExtension: String = "pdf") {
-    val dir = new File("target/dot") 
+    val dir = new File("target/dot")
     dir.mkdirs()
-    val dotFile = new File(dir, clazz.getSimpleName + ".dot")
-    val outFile = new File(dir, clazz.getSimpleName + "." + outputExtension)
+    val dotFile = new File(dir, clazzName + ".dot")
+    val outFile = new File(dir, clazzName + "." + outputExtension)
     println("Generating " + outFile + "...")
-    
-    withWriter(new PrintWriter(dotFile)) {
-      w.println("digraph {")
-      w.println("graph [label=\"" + clazz.getSimpleName + "\", concentrate=true];")
-      w.println("node [shape=box, style=filled, color=" + defaultColor + "];")
 
-      0 until index.size foreach processEntry
-      w.println("}")
+    withWriter(new PrintWriter(dotFile)) {
+      digraph {
+        w println graphLine("label" -> q(clazzName), "concentrate" -> true)
+        w println nodeLine("shape" -> "box", "style" -> "filled", "color" -> defaultColor)
+        0 until index.size foreach processEntry
+      }
     }
 
     (
@@ -105,94 +124,151 @@ class PickleProcessor(clazz: Class[_]) {
       processEntry(tag, len, i)
     }
   }
+  
+  def tag2string(tag: Int): String = tag match {
+    case TERMname       => "TermName"
+    case TYPEname       => "TypeName"
+    case NONEsym        => "NoSymbol"
+    case TYPEsym        => "type"
+    case ALIASsym       => "alias"
+    case CLASSsym       => "class"
+    case MODULEsym      => "object"
+    case VALsym         => "value"
+    case EXTref         => "Ext"
+    case EXTMODCLASSref => "ExtModule"
+    case NOtpe          => "NoType"
+    case NOPREFIXtpe    => "NoPrefix"
+    case THIStpe        => "ThisType"
+    case SINGLEtpe      => "SingleType"
+    case CONSTANTtpe    => "ConstantType"
+    case TYPEREFtpe     => "TypeRef"
+    case TYPEBOUNDStpe  => "TypeBounds"
+    case REFINEDtpe     => "RefinedType"
+    case CLASSINFOtpe   => "ClassInfoType"
+    case METHODtpe      => "MethodType"
+    case POLYtpe        => "PolyType"
+    case IMPLICITMETHODtpe => "MethodType" // IMPLICITMETHODtpe no longer used.
+    case SUPERtpe       => "SuperType"
+    case LITERALunit    => "()"
+    case LITERALboolean => "Boolean"
+    case LITERALbyte    => "Byte"
+    case LITERALshort   => "Short"
+    case LITERALchar    => "Char"
+    case LITERALint     => "Int"
+    case LITERALlong    => "Long"
+    case LITERALfloat   => "Float"
+    case LITERALdouble  => "Double"
+    case LITERALstring  => "String"
+    case LITERALnull    => "null"
+    case LITERALclass   => "Class[_]"
+    case LITERALenum    => "Enum"
+    case SYMANNOT       => "Annotation"
+    case CHILDREN       => "Children"
+    case ANNOTATEDtpe   => "AnnotatedType"
+    case ANNOTINFO      => "AnnotationInfo"
+    case ANNOTARGARRAY  => "AnnotArgArray"
+    case EXISTENTIALtpe => "ExistentialType"
+    case TREE           => "Tree"
+    case MODIFIERS      => "Modifiers"
+        
+    case _ => "***BAD TAG***(" + tag + ")"
+  }
+  
 
   def processEntry(tag: Int, len: Int, i: Int) {
     val end = buf.readIndex + len
-
-    val tn = ShowPickled.tag2string(tag)
+    val tn  = tag2string(tag)
 
     tag match {
       case (TERMname | TYPEname) =>
-        processNameInfo(i, tn, end)
+        indexToName(i) = readNameInfo(end)
+        
       case (TYPEsym | ALIASsym | MODULEsym) =>
         processSymbolInfo(i, tn, end)
       case CLASSsym =>
         processSymbolInfo(i, tn, end)
-        if (buf.readIndex < end) {processRef(i, "thistype_Ref")}
+        if (buf.readIndex < end) {processRef(i, "thisType")}
       case VALsym =>
         processSymbolInfo(i, tn, end)
-        if (buf.readIndex < end) {processRef(i, "alias_Ref")}
+        if (buf.readIndex < end) {processRef(i, "alias")}
       case NONEsym =>
         printNodeInfo(i, tn, symColor)
-      case (EXTref | EXTMODCLASSref) =>
-        printNodeInfo(i, tn, refColor)
-        processRef(i, "name_Ref")
-        if (buf.readIndex < end) {processRef(i, "owner_Ref")}
+      case EXTref =>
+        val refName = readNameRef()
+        printNodeInfo(i, "class " + refName, refColor)
+        if (buf.readIndex < end)
+          processOwnerRef(i)
+          
+      case EXTMODCLASSref =>
+        val refName = readNameRef()
+        printNodeInfo(i, "module " + refName, refColor)
+        if (buf.readIndex < end)
+          processOwnerRef(i)
+
       case THIStpe =>
         printNodeInfo(i, tn, tpeColor)
-        processRef(i, "sym_Ref")
+        processRef(i, "sym")
       case SINGLEtpe =>
         printNodeInfo(i, tn, tpeColor)
-        processRef(i, "tpe_Ref")
-        processRef(i, "sym_Ref")
+        processRef(i, "tpe")
+        processRef(i, "sym")
       case CONSTANTtpe =>
         printNodeInfo(i, tn, tpeColor)
-        processRef(i, "constant_Ref")
+        processRef(i, "const")
       case (TYPEBOUNDStpe | SUPERtpe) =>
         printNodeInfo(i, tn, tpeColor)
-        processRef(i, "tpe_Ref")
-        processRef(i, "tpe_Ref")
+        processRef(i, "lo")
+        processRef(i, "hi")
       case TYPEREFtpe =>
         printNodeInfo(i, tn, tpeColor)
-        processRef(i, "tpe_Ref")
-        processRef(i, "sym_Ref")
-        processListRef(i, end, "targ_Ref")
+        processRef(i, "pre")
+        processRef(i, "sym")
+        processListRef(i, end, "args")
       case (REFINEDtpe | CLASSINFOtpe) =>
         printNodeInfo(i, tn, tpeColor)
-        processRef(i, "classsym_Ref")
-        processListRef(i, end, "tpe_Ref")
+        processRef(i, "classSym")
+        processListRef(i, end, "tpe")
       case (METHODtpe | POLYtpe | IMPLICITMETHODtpe) =>
         printNodeInfo(i, tn, tpeColor)
-        processRef(i, "tpe_Ref")
-        processListRef(i, end, "sym_Ref")
+        processRef(i, "tpe")
+        processListRef(i, end, "sym")
       case ANNOTATEDtpe =>
         printNodeInfo(i, tn, tpeColor)
-        processRef(i, "tpe_Ref")
-        processListRef(i, end, "annotinfo_Ref")
+        processRef(i, "tpe")
+        processListRef(i, end, "annotInfo")
       case EXISTENTIALtpe =>
         printNodeInfo(i, tn, tpeColor)
-        processRef(i, "tpe_Ref")
-        processListRef(i, end, "sym_Ref")
+        processRef(i, "tpe")
+        processListRef(i, end, "sym")
       case LITERALboolean =>
         val v = if (buf.readLong(len) == 0L) "false" else "true"
-        printLiteralNodeInfo(i, tn + "" + v)
+        printLiteralNodeInfo(i, v)
       case LITERALbyte =>
-        printLiteralNodeInfo(i, tn + "" + buf.readLong(len).toByte)
+        printLiteralNodeInfo(i, buf.readLong(len).toByte + ": " + tn)
       case LITERALshort =>
-        printNodeInfo(i, tn + "" + buf.readLong(len).toShort)
+        printNodeInfo(i, buf.readLong(len).toShort + ": " + tn)
       case LITERALchar =>
-        printLiteralNodeInfo(i, tn + "" + buf.readLong(len).toChar)
+        printLiteralNodeInfo(i, buf.readLong(len).toChar + ": " + tn)
       case LITERALint =>
-        printLiteralNodeInfo(i, tn + "" + buf.readLong(len).toInt)
+        printLiteralNodeInfo(i, "" + buf.readLong(len).toInt)
       case LITERALlong =>
-        printLiteralNodeInfo(i, tn + "" + buf.readLong(len))
+        printLiteralNodeInfo(i, buf.readLong(len) + "L")
       case LITERALfloat =>
-        printLiteralNodeInfo(i, tn + "" + intBitsToFloat(buf.readLong(len).toInt))
+        printLiteralNodeInfo(i, intBitsToFloat(buf.readLong(len).toInt) + "f")
       case LITERALdouble =>
-        printLiteralNodeInfo(i, "" + longBitsToDouble(buf.readLong(len)))
+        printLiteralNodeInfo(i, longBitsToDouble(buf.readLong(len)) + "d")
       case LITERALstring =>
-        printNodeInfo(i, tn, literalColor)
-        processRef(i, "name_Ref")
+        printNodeInfo(i, readNameRef(), literalColor)
       case LITERALnull =>
         printNodeInfo(i, tn, literalColor)
       case LITERALclass =>
         printNodeInfo(i, tn, literalColor)
-        processRef(i, "tpe_Ref")
+        processRef(i, "tpe")
       case LITERALenum =>
         printNodeInfo(i, tn, literalColor)
-        processRef(i, "sym_Ref")
+        processRef(i, "sym")
       case SYMANNOT =>
-        processRef(i, "sym_Ref")
+        processRef(i, "sym")
         processAnnotInfoBody(i, tn, end)
       case CHILDREN =>
         printNodeInfo(i, tn, annotColor)
@@ -200,7 +276,7 @@ class PickleProcessor(clazz: Class[_]) {
         processAnnotInfoBody(i, tn, end)
       case ANNOTARGARRAY =>
         printNodeInfo(i, tn, annotColor)
-        processListRef(i, end, "constAnnotArg_Ref")
+        processListRef(i, end, "constAnnotArg")
       case _ =>
         printNodeInfo(i, tn)
     }
@@ -215,42 +291,63 @@ class PickleProcessor(clazz: Class[_]) {
   }
 
   def printLiteralNodeInfo(i: Int, value: String) {
-    printNodeInfo(i, "(" + value + ")", literalColor)
+    printNodeInfo(i, value, literalColor)
   }
 
-  def processNameInfo(i: Int, tag: String, end: Int) {
-    val data = buf.bytes.slice(buf.readIndex, end)
-    val name = new String(data)
-    printNodeInfo(i, tag + "(" + name + ")", nameColor)
-  }
+  def readNameInfo(end: Int) = new String(buf.bytes.slice(buf.readIndex, end))
+  
+  private def compose(xs: Any*): String = xs map ("" + _) filterNot (_ == "") mkString " "
 
   def processSymbolInfo(i: Int, tag: String, end: Int) {
     val pos = buf.readIndex
+    val nameRef = readNameRef()
+    processOwnerRef(i)
 
-    processRef(i, "name_Ref")
-    processRef(i, "owner_Ref")
-    val flagLongNat = buf.readLongNat
+    val flagLongNat = Flags.rawFlagsToPickled(buf.readLongNat)
+    val hasFlag0    = 0 to 62 map (1L << _) filter (f => (flagLongNat & f) != 0L)
+    val isParam     = hasFlag0 contains Flags.PARAM
+    val isTParam    = isParam && (tag == "type")
+    val isImplicit  = hasFlag0 contains Flags.IMPLICIT
+    val filtFlags   = (hasFlag0 filterNot Set(Flags.PARAM, Flags.IMPLICIT)).foldLeft(0L)(_ & _)
+    val flagString  = Flags.flagsToString(filtFlags)
 
     // Handle optional [privateWithin_Ref]
     val nextIdx = buf.readNat
-    val (privateWithinIdx, infoIdx) = if (buf.readIndex == end) {
-      (-1, nextIdx)
-    } else {
-      (nextIdx, buf.readNat)
-    }
+    val (privateWithinIdx, infoIdx) = (
+      if (buf.readIndex == end) (-1, nextIdx)
+      else (nextIdx, buf.readNat)
+    )
+    val description = compose(
+      flagString,
+      if (isImplicit) "implicit" else "",
+      if (isTParam) "tparam" else if (isParam) "param" else "",
+      if (tag == "class" || tag == "type" || tag == "alias") tag else "",
+      nameRef
+    )
+    printNodeInfo(i, description, symColor)
 
-    printNodeInfo(i, tag + "[" + Flags.flagsToString(flagLongNat) + "]", symColor)
+    if (privateWithinIdx != -1)
+      processRef(i, privateWithinIdx, "privateWithin")
 
-    if (privateWithinIdx != -1) {
-      processRef(i, privateWithinIdx, "privateWithin_Ref")
-    }
-    processRef(i, infoIdx, "info_Ref")
+    processRef(i, infoIdx, "info")
   }
 
   def processAnnotInfoBody(i: Int, tag: String, end: Int) {
     printNodeInfo(i, tag, annotColor)
-    processRef(i, "info_Ref")
+    processRef(i, "info")
     processListRef(i, end)
+  }
+  
+  def readNameRef() = {
+    val refIdx = buf.readNat
+    val pos    = buf.readIndex
+    processEntry(refIdx)
+    buf.readIndex = pos
+    indexToName(refIdx)
+  }
+  
+  def processOwnerRef(i: Int) {
+    w.println(i + " -> " + buf.readNat + " [label=\"owner\"];")
   }
 
   def processRef(i: Int, name: String) {
@@ -262,56 +359,55 @@ class PickleProcessor(clazz: Class[_]) {
 
     w.println(i + " -> " + refIdx + " [label=\"" + name + "\"];")
     processEntry(refIdx)
-
     buf.readIndex = pos
   }
 
   def processListRef(i: Int, end: Int, name: String = "") {buf.until(end, () => processRef(i, name))}
 
   def treeTag2string(tag: Int): String = tag match {
-    case EMPTYtree => "EMPTYtree"
-    case PACKAGEtree => "PACKAGEtree"
-    case CLASStree => "CLASStree"
-    case MODULEtree => "MODULEtree"
-    case VALDEFtree => "VALDEFtree"
-    case DEFDEFtree => "DEFDEFtree"
-    case TYPEDEFtree => "TYPEDEFtree"
-    case LABELtree => "LABELtree"
-    case IMPORTtree => "IMPORTtree"
-    case DOCDEFtree => "DOCDEFtree"
-    case TEMPLATEtree => "TEMPLATEtree"
-    case BLOCKtree => "BLOCKtree"
-    case CASEtree => "CASEtree"
-    case ALTERNATIVEtree => "ALTERNATIVEtree"
-    case STARtree => "STARtree"
-    case BINDtree => "BINDtree"
-    case UNAPPLYtree => "UNAPPLYtree"
-    case ARRAYVALUEtree => "ARRAYVALUEtree"
-    case FUNCTIONtree => "FUNCTIONtree"
-    case ASSIGNtree => "ASSIGNtree"
-    case IFtree => "IFtree"
-    case MATCHtree => "MATCHtree"
-    case RETURNtree => "RETURNtree"
-    case TREtree => "TREtree"
-    case THROWtree => "THROWtree"
-    case NEWtree => "NEWtree"
-    case TYPEDtree => "TYPEDtree"
-    case TYPEAPPLYtree => "TYPEAPPLYtree"
-    case APPLYtree => "APPLYtree"
-    case APPLYDYNAMICtree => "APPLYDYNAMICtree"
-    case SUPERtree => "SUPERtree"
-    case THIStree => "THIStree"
-    case SELECTtree => "SELECTtree"
-    case IDENTtree => "IDENTtree"
-    case LITERALtree => "LITERALtree"
-    case TYPEtree => "TYPEtree"
-    case ANNOTATEDtree => "ANNOTATEDtree"
-    case SINGLETONTYPEtree => "SINGLETONTYPEtree"
-    case SELECTFROMTYPEtree => "SELECTFROMTYPEtree"
-    case COMPOUNDTYPEtree => "COMPOUNDTYPEtree"
-    case APPLIEDTYPEtree => "APPLIEDTYPEtree"
-    case TYPEBOUNDStree => "TYPEBOUNDStree"
+    case ALTERNATIVEtree     => "ALTERNATIVEtree"
+    case ANNOTATEDtree       => "ANNOTATEDtree"
+    case APPLIEDTYPEtree     => "APPLIEDTYPEtree"
+    case APPLYDYNAMICtree    => "APPLYDYNAMICtree"
+    case APPLYtree           => "APPLYtree"
+    case ARRAYVALUEtree      => "ARRAYVALUEtree"
+    case ASSIGNtree          => "ASSIGNtree"
+    case BINDtree            => "BINDtree"
+    case BLOCKtree           => "BLOCKtree"
+    case CASEtree            => "CASEtree"
+    case CLASStree           => "CLASStree"
+    case COMPOUNDTYPEtree    => "COMPOUNDTYPEtree"
+    case DEFDEFtree          => "DEFDEFtree"
+    case DOCDEFtree          => "DOCDEFtree"
+    case EMPTYtree           => "EMPTYtree"
     case EXISTENTIALTYPEtree => "EXISTENTIALTYPEtree"
+    case FUNCTIONtree        => "FUNCTIONtree"
+    case IDENTtree           => "IDENTtree"
+    case IFtree              => "IFtree"
+    case IMPORTtree          => "IMPORTtree"
+    case LABELtree           => "LABELtree"
+    case LITERALtree         => "LITERALtree"
+    case MATCHtree           => "MATCHtree"
+    case MODULEtree          => "MODULEtree"
+    case NEWtree             => "NEWtree"
+    case PACKAGEtree         => "PACKAGEtree"
+    case RETURNtree          => "RETURNtree"
+    case SELECTFROMTYPEtree  => "SELECTFROMTYPEtree"
+    case SELECTtree          => "SELECTtree"
+    case SINGLETONTYPEtree   => "SINGLETONTYPEtree"
+    case STARtree            => "STARtree"
+    case SUPERtree           => "SUPERtree"
+    case TEMPLATEtree        => "TEMPLATEtree"
+    case THIStree            => "THIStree"
+    case THROWtree           => "THROWtree"
+    case TREtree             => "TREtree"
+    case TYPEAPPLYtree       => "TYPEAPPLYtree"
+    case TYPEBOUNDStree      => "TYPEBOUNDStree"
+    case TYPEDEFtree         => "TYPEDEFtree"
+    case TYPEDtree           => "TYPEDtree"
+    case TYPEtree            => "TYPEtree"
+    case UNAPPLYtree         => "UNAPPLYtree"
+    case VALDEFtree          => "VALDEFtree"
 
     case _ => throw new RuntimeException("Unknown tree tag: " + tag)
   }
